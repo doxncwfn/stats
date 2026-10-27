@@ -363,9 +363,9 @@ internal class Preview: PreviewWrapper {
         
         DispatchQueue.main.async(execute: {
             if (self.window?.isVisible ?? false) || !self.initializedFrequency {
-                self.average1Field?.stringValue = "\(value.load1)"
-                self.average5Field?.stringValue = "\(value.load5)"
-                self.average15Field?.stringValue = "\(value.load15)"
+                self.average1Field?.stringValue = String(format: "%.2f", value.load1)
+                self.average5Field?.stringValue = String(format: "%.2f", value.load5)
+                self.average15Field?.stringValue = String(format: "%.2f", value.load15)
                 
                 self.initializedAverage = true
             }

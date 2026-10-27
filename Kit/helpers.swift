@@ -13,7 +13,6 @@
 import Cocoa
 import ServiceManagement
 import UserNotifications
-import WebKit
 import Metal
 import IOKit.pwr_mgt
 import WidgetKit
@@ -1146,7 +1145,7 @@ public class SMCHelper {
     }
     
     private var legacyIsInstalled: Bool {
-        syncShell("ls /Library/PrivilegedHelperTools/").contains(self.id)
+        FileManager.default.fileExists(atPath: "/Library/PrivilegedHelperTools/\(self.id)")
     }
     
     private var connection: NSXPCConnection? = nil
@@ -2072,7 +2071,7 @@ public class PreferencesSwitch: NSStackView {
     }
 }
 
-public class HelpHUD: NSPanel {
+public class HelpHUD: NSPanel, NSWindowDelegate {
     private let text: String
 
     public init(_ text: String, origin: CGPoint = CGPoint(x: 0, y: 0), size: CGSize = CGSize(width: 420, height: 300)) {
@@ -2086,29 +2085,56 @@ public class HelpHUD: NSPanel {
         self.isMovableByWindowBackground = true
         self.level = .floating
         self.title = "Help"
+        self.delegate = self
     }
     
     public func show() {
-        if self.contentView as? WKWebView == nil {
-            let webView = WKWebView()
-            webView.underPageBackgroundColor = .clear
-            let style = """
-            :root { color-scheme: light dark; }
-            body {
-                margin: 10px;
-                font-family: -apple-system, 'Helvetica Neue', sans-serif;
-                color: #000000;
+        if self.contentView == nil {
+            let scrollView = NSScrollView(frame: NSRect(origin: .zero, size: self.frame.size))
+            scrollView.hasVerticalScroller = true
+            scrollView.hasHorizontalScroller = false
+            scrollView.autohidesScrollers = true
+            scrollView.drawsBackground = false
+
+            let textView = NSTextView(frame: scrollView.bounds)
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.drawsBackground = false
+            textView.textContainer?.widthTracksTextView = true
+            textView.textContainerInset = NSSize(width: 12, height: 12)
+            textView.textColor = .textColor
+            
+            let colorHex = NSColor.textColor.hexString
+            let htmlData = Data("""
+            <html><head><style>
+            body { font-family: -apple-system, 'Helvetica Neue', sans-serif; font-size: 13px; color: \(colorHex); }
+            h2 { font-size: 15px; margin-bottom: 4px; }
+            h3 { font-size: 13px; margin-bottom: 2px; }
+            ul { margin-top: 4px; padding-left: 18px; }
+            li { margin-bottom: 2px; }
+            </style></head><body>\(self.text)</body></html>
+            """.utf8)
+
+            if let attrString = try? NSAttributedString(
+                data: htmlData,
+                options: [.documentType: NSAttributedString.DocumentType.html, .characterEncoding: String.Encoding.utf8.rawValue],
+                documentAttributes: nil
+            ) {
+                textView.textStorage?.setAttributedString(attrString)
+            } else {
+                textView.string = self.text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
             }
-            @media (prefers-color-scheme: dark) {
-                body { color: #ffffff; }
-            }
-            """
-            webView.loadHTMLString("<html><head><style>\(style)</style></head><body>\(self.text)</body></html>", baseURL: nil)
-            self.contentView = webView
+            
+            scrollView.documentView = textView
+            self.contentView = scrollView
         }
         
         self.makeKeyAndOrderFront(self)
         self.center()
+    }
+    
+    public func windowWillClose(_ notification: Notification) {
+        self.contentView = nil
     }
 }
 

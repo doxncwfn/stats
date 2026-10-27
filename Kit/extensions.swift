@@ -145,20 +145,61 @@ internal final class WidgetTextCache {
 public final class ProcessIconCache {
     public static let shared = ProcessIconCache()
     
-    private let cache = NSCache<NSNumber, NSImage>()
+    private let cache = NSCache<NSString, NSImage>()
     
     init() {
-        self.cache.countLimit = 256
+        self.cache.countLimit = 80
+        self.cache.totalCostLimit = 512 * 1024 // 512 KB
     }
     
     public func icon(for pid: Int) -> NSImage {
-        let key = NSNumber(value: pid)
-        if let cached = self.cache.object(forKey: key) {
+        let app = NSRunningApplication(processIdentifier: pid_t(pid))
+        let cacheKey = (app?.bundleIdentifier ?? app?.executableURL?.path ?? "\(pid)") as NSString
+        if let cached = self.cache.object(forKey: cacheKey) {
             return cached
         }
-        let icon = NSRunningApplication(processIdentifier: pid_t(pid))?.icon ?? Constants.defaultProcessIcon
-        self.cache.setObject(icon, forKey: key)
-        return icon
+        
+        let sourceIcon = app?.icon ?? Constants.defaultProcessIcon
+        let thumbnail = Self.downscale(sourceIcon)
+        // 36x36 px @ 4 bytes per pixel = 5,184 bytes
+        self.cache.setObject(thumbnail, forKey: cacheKey, cost: 36 * 36 * 4)
+        return thumbnail
+    }
+    
+    private static func downscale(_ icon: NSImage) -> NSImage {
+        let pixelWidth = 36
+        let pixelHeight = 36
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
+        
+        guard let context = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: pixelWidth * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo
+        ) else {
+            return icon
+        }
+        
+        let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
+        let previousContext = NSGraphicsContext.current
+        NSGraphicsContext.current = graphicsContext
+        icon.draw(
+            in: NSRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight),
+            from: .zero,
+            operation: .copy,
+            fraction: 1.0
+        )
+        NSGraphicsContext.current = previousContext
+        
+        guard let cgImage = context.makeImage() else {
+            return icon
+        }
+        
+        return NSImage(cgImage: cgImage, size: NSSize(width: 18, height: 18))
     }
 }
 

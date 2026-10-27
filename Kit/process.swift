@@ -383,7 +383,7 @@ public class ProcessView: NSStackView {
     
     @objc private func kill() {
         if let pid = self.pid, pid > 0 {
-            _ = syncShell("kill -9 \(pid)")
+            Darwin.kill(pid_t(pid), SIGKILL)
             self.clear()
         }
     }

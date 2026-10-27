@@ -382,7 +382,7 @@ internal class Popup: PopupWrapper {
             
             for i in 0..<list.count {
                 let process = list[i]
-                self.processes?.set(i, process, ["\(process.usage)%"])
+                self.processes?.set(i, process, [String(format: "%.1f%%", process.usage)])
             }
             
             self.processesInitialized = true
@@ -539,6 +539,7 @@ internal class BatteryView: NSView {
         self.charging = charging
         
         DispatchQueue.main.async(execute: {
+            guard self.window?.isVisible == true else { return }
             self.display()
         })
     }

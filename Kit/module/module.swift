@@ -80,7 +80,11 @@ open class Module {
     public var enabled: Bool = false
     
     public var menuBar: MenuBar
-    public var window: Window? = nil
+    private var _window: Window? = nil
+    public var window: Window? {
+        get { self.ensureWindow() }
+        set { self._window = newValue }
+    }
     public let portal: Portal_p?
     
     public var name: String { config.name }
@@ -158,18 +162,6 @@ open class Module {
         } else {
             debug("Module started without widget", log: self.log)
         }
-        
-        self.window = Window(
-            config: self.config,
-            widgets: self.menuBar.widgets,
-            modulePreview: self.previewView,
-            moduleSettings: self.settingsView,
-            popupSettings: self.popupView,
-            notificationsSettings: self.notificationsView
-        )
-        self.window?.setState(self.enabled)
-        
-        self.popup = PopupWindow(title: self.config.name, module: self.moduleType, view: self.popupView, visibilityCallback: self.popupVisibilityCallback)
     }
     
     deinit {
@@ -191,6 +183,8 @@ open class Module {
     
     // terminate function which call before app termination
     public func terminate() {
+        self.teardownPopup()
+        self.teardownWindow()
         self.willTerminate()
         self.readers.forEach{
             $0.stop()
@@ -204,7 +198,7 @@ open class Module {
     open func willTerminate() {}
     
     // set module state to enabled
-    public func enable() {
+    open func enable() {
         guard self.available else { return }
         
         self.enabled = true
@@ -212,12 +206,12 @@ open class Module {
         self.userDefaults?.set(true, forKey: "\(self.config.name)_state")
         self.startReaders()
         self.menuBar.enable()
-        self.window?.setState(self.enabled)
+        self._window?.setState(self.enabled)
         debug("Module enabled", log: self.log)
     }
     
     // set module state to disabled
-    public func disable() {
+    open func disable() {
         guard self.available else { return }
         
         self.enabled = false
@@ -229,10 +223,9 @@ open class Module {
             $0.lock()
             $0.stop()
         }
-        self.popupVisible = false
+        self.teardownPopup()
         self.menuBar.disable()
-        self.window?.setState(self.enabled)
-        self.popup?.setIsVisible(false)
+        self._window?.setState(self.enabled)
         debug("Module disabled", log: self.log)
     }
     
@@ -265,9 +258,60 @@ open class Module {
         self.updateReaderVisibility()
     }
     
+    // popup lifecycle management
+    private func ensurePopupWindow() -> PopupWindow {
+        if let popup = self.popup { return popup }
+        let popup = PopupWindow(title: self.config.name, module: self.moduleType, view: self.popupView, visibilityCallback: self.popupVisibilityCallback)
+        popup.isReleasedWhenClosed = false
+        popup.onClose = { [weak self] in
+            self?.teardownPopup()
+        }
+        self.popup = popup
+        return popup
+    }
+
+    private func teardownPopup() {
+        self.popupVisible = false
+        self.updateReaderVisibility()
+        guard let popup = self.popup else { return }
+        self.popup = nil
+        popup.onClose = nil
+        popup.delegate = nil
+        popup.openedBy = nil
+        popup.locked = false
+        popup.contentViewController = nil
+        popup.contentView = nil
+        popup.close()
+    }
+
+    // window lifecycle management
+    private func ensureWindow() -> Window? {
+        if let w = self._window { return w }
+        guard self.available else { return nil }
+        let w = Window(
+            config: self.config,
+            widgets: self.menuBar.widgets,
+            modulePreview: self.previewView,
+            moduleSettings: self.settingsView,
+            popupSettings: self.popupView,
+            notificationsSettings: self.notificationsView
+        )
+        w.setState(self.enabled)
+        self._window = w
+        return w
+    }
+
+    private func teardownWindow() {
+        self._window?.subviews.forEach { $0.removeFromSuperview() }
+        self._window = nil
+    }
+    
     @objc private func listenForWindowOpen(_ notification: Notification) {
         guard let state = notification.userInfo?["state"] as? Bool else { return }
         self.settingsVisible = state && (notification.userInfo?["module"] as? String == self.config.name)
+        if !state && notification.userInfo?["module"] == nil {
+            self.teardownWindow()
+        }
         self.updateReaderVisibility()
     }
     
@@ -312,8 +356,7 @@ open class Module {
     }
     
     @objc private func listenForPopupToggle(_ notification: Notification) {
-        guard let popup = self.popup,
-              let name = notification.userInfo?["module"] as? String,
+        guard let name = notification.userInfo?["module"] as? String,
               let buttonOrigin = notification.userInfo?["origin"] as? CGPoint,
               let buttonCenter = notification.userInfo?["center"] as? CGFloat,
               self.config.name == name else {
@@ -323,13 +366,18 @@ open class Module {
         let openedWindows = NSApplication.shared.windows.filter{ $0 is NSPanel }
         openedWindows.forEach{ $0.setIsVisible(false) }
         
+        let isCurrentlyOpen = self.popup?.isVisible == true
         var reopen: Bool = false
         if let widget = notification.userInfo?["widget"] as? widget_t {
-            reopen = popup.openedBy != nil && popup.openedBy != widget
-            popup.openedBy = widget
+            reopen = self.popup?.openedBy != nil && self.popup?.openedBy != widget
         }
         
-        if popup.occlusionState.rawValue == 8192 || reopen {
+        if !isCurrentlyOpen || reopen {
+            let popup = self.ensurePopupWindow()
+            if let widget = notification.userInfo?["widget"] as? widget_t {
+                popup.openedBy = widget
+            }
+            
             NSApplication.shared.activate(ignoringOtherApps: true)
             
             popup.contentView?.invalidateIntrinsicContentSize()
@@ -351,9 +399,7 @@ open class Module {
             popup.setFrameOrigin(NSPoint(x: x, y: y))
             popup.setIsVisible(true)
         } else {
-            popup.locked = false
-            popup.openedBy = nil
-            popup.setIsVisible(false)
+            self.teardownPopup()
         }
     }
     
@@ -384,7 +430,7 @@ open class Module {
     
     @objc private func listenForMouseDownInSettings() {
         if let popup = self.popup, popup.isVisible && !popup.locked {
-            self.popup?.setIsVisible(false)
+            self.teardownPopup()
         }
     }
     

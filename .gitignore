@@ -14,3 +14,9 @@ SMC/smc
 
 Cartfile.resolved
 web
+
+# Rust & Telemetry Core build artifacts
+rust-core/target/
+
+# Graphify analysis outputs
+graphify-out/

@@ -79,7 +79,7 @@ class ApplicationSettings: NSStackView {
     private var CPUeTest: CPUStressTest = CPUStressTest(type: .efficiency)
     private var CPUpTest: CPUStressTest = CPUStressTest(type: .performance)
     private var CPUsTest: CPUStressTest = CPUStressTest(type: .super)
-    private var GPUTest: GPUStressTest? = GPUStressTest()
+    private var GPUTest: GPUStressTest? = nil
     
     private var planField: NSTextField?
     
@@ -496,12 +496,13 @@ class ApplicationSettings: NSStackView {
     }
     
     @objc private func toggleGPUStressTest() {
-        guard let test = self.GPUTest else { return }
-        
-        if test.isRunning {
+        if let test = self.GPUTest, test.isRunning {
             test.stop()
+            self.GPUTest = nil
             self.GPUButton?.title = localizedString("Run")
         } else {
+            guard let test = GPUStressTest() else { return }
+            self.GPUTest = test
             test.start()
             self.GPUButton?.title = localizedString("Stop")
         }

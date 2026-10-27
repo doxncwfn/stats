@@ -186,6 +186,25 @@ public class Remote: Module {
             popup: self.popupView,
             settings: self.settingsView,
         )
+        guard self.available && self.enabled else { return }
+        self.initRemote()
+    }
+    
+    private var isRemoteInitialized: Bool = false
+    
+    open override func enable() {
+        self.initRemote()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.dataReader?.stop()
+    }
+    
+    private func initRemote() {
+        guard !self.isRemoteInitialized, self.available else { return }
+        self.isRemoteInitialized = true
         
         self.dataReader = DataReader(.remote) { [weak self] snapshot in
             self?.callback(snapshot)

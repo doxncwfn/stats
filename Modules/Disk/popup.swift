@@ -590,6 +590,9 @@ internal class ChartView: NSStackView {
     
     public func appear() {
         self.cache.replay(render: self.renderActivity)
+        if let v = self.cache.value, let read = v.read, let write = v.write {
+            self.chart?.addValue(upload: Double(write), download: Double(read))
+        }
         self.chart?.display()
     }
     

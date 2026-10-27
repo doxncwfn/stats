@@ -43,7 +43,9 @@ internal class Repeater {
             leeway: .milliseconds(200)
         )
         self.timer.setEventHandler { [weak self] in
-            self?.callback()
+            autoreleasepool {
+                self?.callback()
+            }
         }
     }
     

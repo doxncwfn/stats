@@ -241,7 +241,28 @@ public class Disk: Module {
             notifications: self.notificationsView,
             preview: self.previewView
         )
-        guard self.available else { return }
+        guard self.available && self.enabled else { return }
+        self.initDisk()
+    }
+    
+    private var isDiskInitialized: Bool = false
+    
+    open override func enable() {
+        self.initDisk()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.capacityReader?.stop()
+        self.activityReader?.stop()
+        self.processReader?.stop()
+        self.smartReader?.stop()
+    }
+    
+    private func initDisk() {
+        guard !self.isDiskInitialized, self.available else { return }
+        self.isDiskInitialized = true
         
         self.capacityReader = CapacityReader(.disk) { [weak self] value in
             if let value {

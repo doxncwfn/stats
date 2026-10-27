@@ -396,6 +396,11 @@ internal class Popup: PopupWrapper {
     
     public override func appear() {
         self.replay(self.usageCache, render: self.renderUsage)
+        if let v = self.usageCache.value, let chart = self.chart {
+            chart.setBase(self.base)
+            chart.setSpeedUnit(self.speedUnit)
+            chart.addValue(upload: Double(v.bandwidth.upload), download: Double(v.bandwidth.download))
+        }
         self.replay(self.connectivityCache, render: self.renderConnectivity)
     }
     

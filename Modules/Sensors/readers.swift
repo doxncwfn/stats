@@ -102,17 +102,19 @@ internal class SensorsReader: Reader<Sensors_List> {
                 }
             }
         }
-        available.forEach { (key: String) in
-            var type: SensorType? = nil
-            switch key.prefix(1) {
-            case "T": type = .temperature
-            case "V": type = .voltage
-            case "P": type = .power
-            case "I": type = .current
-            default: type = nil
-            }
-            if let t = type {
-                list.append(Sensor(key: key, name: key, group: .unknown, type: t, platforms: []))
+        if self.unknownSensorsState {
+            available.forEach { (key: String) in
+                var type: SensorType? = nil
+                switch key.prefix(1) {
+                case "T": type = .temperature
+                case "V": type = .voltage
+                case "P": type = .power
+                case "I": type = .current
+                default: type = nil
+                }
+                if let t = type {
+                    list.append(Sensor(key: key, name: key, group: .unknown, type: t, platforms: []))
+                }
             }
         }
         
@@ -128,7 +130,11 @@ internal class SensorsReader: Reader<Sensors_List> {
         results += list.filter({ (s: Sensor_p) -> Bool in
             if s.type == .temperature && (s.value == 0 || s.value > 110) {
                 return false
-            } else if s.type == .current && s.value > 100 {
+            } else if s.type == .current && (s.value == 0 || s.value > 100) {
+                return false
+            } else if (s.type == .voltage || s.type == .power) && s.value == 0 {
+                return false
+            } else if s.group == .unknown && s.value == 0 {
                 return false
             }
             return true
@@ -146,19 +152,20 @@ internal class SensorsReader: Reader<Sensors_List> {
     }
     
     public override func read() {
-        var sensors = self.list.sensors
-        
-        for i in sensors.indices {
-            guard sensors[i].group != .hid && !sensors[i].isComputed else { continue }
-            if !self.unknownSensorsState && sensors[i].group == .unknown { continue }
+        autoreleasepool {
+            var sensors = self.list.sensors
             
-            var newValue = SMC.shared.getValue(sensors[i].key) ?? 0
-            if sensors[i].type == .temperature && sensors[i].group == .CPU &&
-                (newValue < 10 || newValue > 120) { // fix for m2 broken sensors
-                newValue = sensors[i].value
+            for i in sensors.indices {
+                guard sensors[i].group != .hid && !sensors[i].isComputed else { continue }
+                if !self.unknownSensorsState && sensors[i].group == .unknown { continue }
+                
+                var newValue = SMC.shared.getValue(sensors[i].key) ?? 0
+                if sensors[i].type == .temperature && sensors[i].group == .CPU &&
+                    (newValue < 10 || newValue > 120) { // fix for m2 broken sensors
+                    newValue = sensors[i].value
+                }
+                sensors[i].value = newValue
             }
-            sensors[i].value = newValue
-        }
         
         var cpuSensors = sensors.filter({ $0.group == .CPU && $0.type == .temperature && $0.average }).map{ $0.value }
         var gpuSensors = sensors.filter({ $0.group == .GPU && $0.type == .temperature && $0.average }).map{ $0.value }
@@ -282,7 +289,8 @@ internal class SensorsReader: Reader<Sensors_List> {
             return list
         }
         
-        self.callback(self.list)
+            self.callback(self.list)
+        }
     }
     
     private func initCalculatedSensors(_ sensors: [Sensor_p]) -> [Sensor_p] {

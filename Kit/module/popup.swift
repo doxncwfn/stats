@@ -81,6 +81,7 @@ public class PopupWindow: NSWindow, NSWindowDelegate {
     private let viewController: PopupViewController
     internal var locked: Bool = false
     internal var openedBy: widget_t? = nil
+    public var onClose: (() -> Void)? = nil
     
     public init(title: String, module: ModuleType, view: Popup_p?, visibilityCallback: @escaping (_ state: Bool) -> Void) {
         self.viewController = PopupViewController(module: module)
@@ -127,6 +128,15 @@ public class PopupWindow: NSWindow, NSWindowDelegate {
         
         self.viewController.setCloseButton(false)
         self.setIsVisible(false)
+        let cb = self.onClose
+        self.onClose = nil
+        cb?()
+    }
+    
+    public func windowWillClose(_ notification: Notification) {
+        let cb = self.onClose
+        self.onClose = nil
+        cb?()
     }
 }
 
@@ -488,6 +498,7 @@ internal class HeaderView: NSStackView {
     @objc private func closePopup() {
         self.window?.setIsVisible(false)
         self.setCloseButton(false)
+        (self.window as? PopupWindow)?.onClose?()
         return
     }
     

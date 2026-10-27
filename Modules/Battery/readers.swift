@@ -277,52 +277,29 @@ public class ProcessReader: Reader<[TopProcess]> {
             return
         }
         
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/top")
-        task.arguments = ["-o", "power", "-l", "2", "-n", "\(self.numberOfProcesses)", "-stats", "pid,command,power"]
-        
-        let outputPipe = Pipe()
-        defer {
-            outputPipe.fileHandleForReading.closeFile()
-        }
-        task.standardOutput = outputPipe
-        
-        do {
-            try task.run()
-        } catch let err {
-            error("error read ps: \(err.localizedDescription)", log: self.log)
+        var procs = StatsTopProcesses()
+        guard stats_core_top_energy_processes(UInt32(self.numberOfProcesses), &procs) else {
             return
         }
-        
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        if outputData.isEmpty {
-            return
-        }
-        
-        let output = String(data: outputData.advanced(by: outputData.count/2), encoding: .utf8)
-        guard let output, !output.isEmpty else { return }
         
         var processes: [TopProcess] = []
-        output.enumerateLines { (line, _) in
-            if line.matches("^\\d+ *[^(\\d)]*\\d+\\.*\\d* *$") {
-                let str = line.trimmingCharacters(in: .whitespaces)
-                let pidFind = str.findAndCrop(pattern: "^\\d+")
-                let usageFind = pidFind.remain.findAndCrop(pattern: " +[0-9]+.*[0-9]*$")
-                let command = usageFind.remain.trimmingCharacters(in: .whitespaces)
-                let pid = Int(pidFind.cropped) ?? 0
-                guard let usage = Double(usageFind.cropped.filter("01234567890.".contains)) else {
-                    return
+        let count = Int(procs.count)
+        withUnsafePointer(to: procs.processes) { ptr in
+            ptr.withMemoryRebound(to: StatsProcessInfo.self, capacity: count) { buf in
+                for i in 0..<count {
+                    let info = buf[i]
+                    let pid = Int(info.pid)
+                    var name = withUnsafeBytes(of: info.name) { rawPtr in
+                        String(cString: rawPtr.baseAddress!.assumingMemoryBound(to: CChar.self))
+                    }
+                    if let app = NSRunningApplication(processIdentifier: pid_t(pid)), let n = app.localizedName {
+                        name = n
+                    }
+                    processes.append(TopProcess(pid: pid, name: name, usage: info.cpu_usage))
                 }
-                
-                var name: String = command
-                if let app = NSRunningApplication(processIdentifier: pid_t(pid)), let n = app.localizedName {
-                    name = n
-                }
-                
-                processes.append(TopProcess(pid: pid, name: name, usage: usage))
             }
         }
         
-        self.callback(processes.suffix(self.numberOfProcesses).sorted(by: { $0.usage > $1.usage }))
+        self.callback(processes)
     }
 }

@@ -185,7 +185,27 @@ public class Network: Module {
             notifications: self.notificationsView,
             preview: self.previewView
         )
-        guard self.available else { return }
+        guard self.available && self.enabled else { return }
+        self.initNetwork()
+    }
+    
+    private var isNetworkInitialized: Bool = false
+    
+    open override func enable() {
+        self.initNetwork()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.usageReader?.stop()
+        self.processReader?.stop()
+        self.connectivityReader?.stop()
+    }
+    
+    private func initNetwork() {
+        guard !self.isNetworkInitialized, self.available else { return }
+        self.isNetworkInitialized = true
         
         self.usageReader = UsageReader(.network) { [weak self] value in
             self?.usageCallback(value)

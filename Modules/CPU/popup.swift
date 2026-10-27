@@ -502,7 +502,7 @@ internal class Popup: PopupWrapper {
             
             for i in 0..<list.count {
                 let process = list[i]
-                self.processes?.set(i, process, ["\(process.usage)%"])
+                self.processes?.set(i, process, [String(format: "%.1f%%", process.usage)])
             }
             
             self.initializedProcesses = true
@@ -538,9 +538,9 @@ internal class Popup: PopupWrapper {
     }
     
     private func renderAverage(_ value: CPU_AverageLoad) {
-        self.average1Field?.stringValue = "\(value.load1)"
-        self.average5Field?.stringValue = "\(value.load5)"
-        self.average15Field?.stringValue = "\(value.load15)"
+        self.average1Field?.stringValue = String(format: "%.2f", value.load1)
+        self.average5Field?.stringValue = String(format: "%.2f", value.load5)
+        self.average15Field?.stringValue = String(format: "%.2f", value.load15)
     }
     
     // MARK: - Settings
