@@ -92,7 +92,26 @@ public class Battery: Module {
             portal: self.portalView,
             notifications: self.notificationsView
         )
-        guard self.available else { return }
+        guard self.available && self.enabled else { return }
+        self.initBattery()
+    }
+    
+    private var isBatteryInitialized: Bool = false
+    
+    open override func enable() {
+        self.initBattery()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.usageReader?.stop()
+        self.processReader?.stop()
+    }
+    
+    private func initBattery() {
+        guard !self.isBatteryInitialized, self.available else { return }
+        self.isBatteryInitialized = true
         
         self.usageReader = UsageReader(.battery) { [weak self] value in
             self?.usageCallback(value)

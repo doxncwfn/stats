@@ -435,79 +435,76 @@ public class ProcessReader: Reader<[Disk_process]> {
     }
     
     public override func read() {
-        guard self.numberOfProcesses != 0, let output = runProcess(path: "/bin/ps", args: ["-Aceo pid,args", "-r"]) else { return }
-        
-        var snapshot = self.list
-        var processes: [Disk_process] = []
-        output.enumerateLines { (line, _) in
-            let str = line.trimmingCharacters(in: .whitespaces)
-            let pidFind = str.findAndCrop(pattern: "^\\d+")
-            guard let pid = Int32(pidFind.cropped) else { return }
-            let name = pidFind.remain.findAndCrop(pattern: "^[^ ]+").cropped
+        autoreleasepool {
+            guard self.numberOfProcesses != 0 else { return }
             
-            var usage = rusage_info_current()
-            let result = withUnsafeMutablePointer(to: &usage) {
-                $0.withMemoryRebound(to: (rusage_info_t?.self), capacity: 1) {
-                    proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+            var pids = [Int32](repeating: 0, count: 1024)
+            let bytesCount = proc_listpids(1, 0, &pids, Int32(MemoryLayout<Int32>.stride * pids.count))
+            guard bytesCount > 0 else { return }
+            let pidsCount = min(Int(bytesCount) / MemoryLayout<Int32>.stride, pids.count)
+            
+            var snapshot = self.list
+            var processes: [Disk_process] = []
+            var activePIDs = Set<Int32>()
+            
+            for i in 0..<pidsCount {
+                let pid = pids[i]
+                if pid <= 0 { continue }
+                activePIDs.insert(pid)
+                
+                var usage = rusage_info_current()
+                let result = withUnsafeMutablePointer(to: &usage) {
+                    $0.withMemoryRebound(to: (rusage_info_t?.self), capacity: 1) {
+                        proc_pid_rusage(pid, RUSAGE_INFO_CURRENT, $0)
+                    }
                 }
-            }
-            guard result != -1 else { return }
-            
-            let bytesRead = Int(clamping: usage.ri_diskio_bytesread)
-            let bytesWritten = Int(clamping: usage.ri_diskio_byteswritten)
-            
-            if snapshot[pid] == nil {
-                snapshot[pid] = io(read: bytesRead, write: bytesWritten)
-            }
-            
-            if let v = snapshot[pid] {
-                let read = bytesRead - v.read
-                let write = bytesWritten - v.write
-                if read != 0 || write != 0 {
-                    processes.append(Disk_process(pid: Int(pid), name: name, read: read, write: write))
+                guard result != -1 else { continue }
+                
+                let bytesRead = Int(clamping: usage.ri_diskio_bytesread)
+                let bytesWritten = Int(clamping: usage.ri_diskio_byteswritten)
+                
+                if snapshot[pid] == nil {
+                    snapshot[pid] = io(read: bytesRead, write: bytesWritten)
                 }
+                
+                if let v = snapshot[pid] {
+                    let read = bytesRead - v.read
+                    let write = bytesWritten - v.write
+                    if read != 0 || write != 0 {
+                        var nameBuf = [CChar](repeating: 0, count: 64)
+                        proc_name(pid, &nameBuf, 64)
+                        var name = String(cString: nameBuf)
+                        if let app = NSRunningApplication(processIdentifier: pid_t(pid)), let n = app.localizedName {
+                            name = n
+                        }
+                        processes.append(Disk_process(pid: Int(pid), name: name, read: read, write: write))
+                    }
+                }
+                
+                snapshot[pid]?.read = bytesRead
+                snapshot[pid]?.write = bytesWritten
             }
             
-            snapshot[pid]?.read = bytesRead
-            snapshot[pid]?.write = bytesWritten
-        }
-        self.list = snapshot
-        
-        processes.sort {
-            let firstMax = max($0.read, $0.write)
-            let secondMax = max($1.read, $1.write)
-            let firstMin = min($0.read, $0.write)
-            let secondMin = min($1.read, $1.write)
-            
-            if firstMax == secondMax && firstMin != secondMin { // max values are the same, min not. Sort by min values
-                return firstMin < secondMin
+            snapshot.keys.filter { !activePIDs.contains($0) }.forEach {
+                snapshot.removeValue(forKey: $0)
             }
-            return firstMax < secondMax // max values are not the same, sort by max value
+            self.list = snapshot
+            
+            processes.sort {
+                let firstMax = max($0.read, $0.write)
+                let secondMax = max($1.read, $1.write)
+                let firstMin = min($0.read, $0.write)
+                let secondMin = min($1.read, $1.write)
+                
+                if firstMax == secondMax && firstMin != secondMin {
+                    return firstMin < secondMin
+                }
+                return firstMax < secondMax
+            }
+            
+            self.callback(processes.suffix(self.numberOfProcesses).reversed())
         }
-        
-        self.callback(processes.suffix(self.numberOfProcesses).reversed())
     }
-}
-
-private func runProcess(path: String, args: [String] = []) -> String? {
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: path)
-    task.arguments = args
-    
-    let outputPipe = Pipe()
-    defer {
-        outputPipe.fileHandleForReading.closeFile()
-    }
-    task.standardOutput = outputPipe
-    
-    do {
-        try task.run()
-    } catch {
-        return nil
-    }
-    
-    let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-    return String(data: outputData, encoding: .utf8)
 }
 
 internal class SMARTReader: Reader<Disks> {

@@ -276,37 +276,39 @@ internal class InfoReader: Reader<GPUs> {
     }
     
     private func readFrames() -> Double? {
-        guard let subscription = self.framesSubscription,
-              let channels = self.framesChannels,
-              let sample = IOReportCreateSamples(subscription, channels, nil)?.takeRetainedValue(),
-              let dict = sample as? [String: Any],
-              let channelsList = dict["IOReportChannels"] as? NSArray else {
-            return nil
+        autoreleasepool {
+            guard let subscription = self.framesSubscription,
+                  let channels = self.framesChannels,
+                  let sample = IOReportCreateSamples(subscription, channels, nil)?.takeRetainedValue(),
+                  let dict = sample as? [String: Any],
+                  let channelsList = dict["IOReportChannels"] as? NSArray else {
+                return nil
+            }
+            let items = channelsList as CFArray
+            
+            var total: Int64 = 0
+            for i in 0..<CFArrayGetCount(items) {
+                let item = unsafeBitCast(CFArrayGetValueAtIndex(items, i), to: CFDictionary.self)
+                guard let group = IOReportChannelGetGroup(item)?.takeUnretainedValue() as? String,
+                      group.hasPrefix("DCP"),
+                      let sub = IOReportChannelGetSubGroup(item)?.takeUnretainedValue() as? String,
+                      sub == "swap" else { continue }
+                total += IOReportSimpleGetIntegerValue(item, 0)
+            }
+            
+            let now = CFAbsoluteTimeGetCurrent()
+            defer {
+                self.previousFramesCount = total
+                self.previousFramesTime = now
+            }
+            
+            guard self.previousFramesTime != 0 else { return nil }
+            let elapsed = now - self.previousFramesTime
+            guard elapsed > 0 else { return nil }
+            let delta = total - self.previousFramesCount
+            guard delta >= 0 else { return nil }
+            return Double(delta) / elapsed
         }
-        let items = channelsList as CFArray
-        
-        var total: Int64 = 0
-        for i in 0..<CFArrayGetCount(items) {
-            let item = unsafeBitCast(CFArrayGetValueAtIndex(items, i), to: CFDictionary.self)
-            guard let group = IOReportChannelGetGroup(item)?.takeUnretainedValue() as? String,
-                  group.hasPrefix("DCP"),
-                  let sub = IOReportChannelGetSubGroup(item)?.takeUnretainedValue() as? String,
-                  sub == "swap" else { continue }
-            total += IOReportSimpleGetIntegerValue(item, 0)
-        }
-        
-        let now = CFAbsoluteTimeGetCurrent()
-        defer {
-            self.previousFramesCount = total
-            self.previousFramesTime = now
-        }
-        
-        guard self.previousFramesTime != 0 else { return nil }
-        let elapsed = now - self.previousFramesTime
-        guard elapsed > 0 else { return nil }
-        let delta = total - self.previousFramesCount
-        guard delta >= 0 else { return nil }
-        return Double(delta) / elapsed
     }
     
     // MARK: - ANE power
@@ -325,55 +327,57 @@ internal class InfoReader: Reader<GPUs> {
     }
     
     private func readANEPower() -> Double? {
-        guard let subscription = self.aneSubscription,
-              let channels = self.aneChannels,
-              let reportSample = IOReportCreateSamples(subscription, channels, nil)?.takeRetainedValue(),
-              let dict = reportSample as? [String: Any],
-              let channelsList = dict["IOReportChannels"] as? NSArray else {
-            return nil
-        }
-        let items = channelsList as CFArray
-        
-        var currentEnergy: Double = 0
-        var found = false
-        
-        for i in 0..<CFArrayGetCount(items) {
-            let item = unsafeBitCast(CFArrayGetValueAtIndex(items, i), to: CFDictionary.self)
+        autoreleasepool {
+            guard let subscription = self.aneSubscription,
+                  let channels = self.aneChannels,
+                  let reportSample = IOReportCreateSamples(subscription, channels, nil)?.takeRetainedValue(),
+                  let dict = reportSample as? [String: Any],
+                  let channelsList = dict["IOReportChannels"] as? NSArray else {
+                return nil
+            }
+            let items = channelsList as CFArray
             
-            guard let group = IOReportChannelGetGroup(item)?.takeUnretainedValue() as? String,
-                  group == "Energy Model",
-                  let channel = IOReportChannelGetChannelName(item)?.takeUnretainedValue() as? String,
-                  channel.starts(with: "ANE") else { continue }
+            var currentEnergy: Double = 0
+            var found = false
             
-            let raw = Double(IOReportSimpleGetIntegerValue(item, 0))
-            let unit = (IOReportChannelGetUnitLabel(item)?.takeUnretainedValue() as? String)?
-                .trimmingCharacters(in: .whitespaces) ?? ""
-            
-            let joules: Double
-            switch unit.lowercased() {
-            case "mj":       joules = raw / 1e3
-            case "uj", "µj": joules = raw / 1e6
-            case "nj":       joules = raw / 1e9
-            case "pj":       joules = raw / 1e12
-            default:         joules = raw / 1e9
+            for i in 0..<CFArrayGetCount(items) {
+                let item = unsafeBitCast(CFArrayGetValueAtIndex(items, i), to: CFDictionary.self)
+                
+                guard let group = IOReportChannelGetGroup(item)?.takeUnretainedValue() as? String,
+                      group == "Energy Model",
+                      let channel = IOReportChannelGetChannelName(item)?.takeUnretainedValue() as? String,
+                      channel.starts(with: "ANE") else { continue }
+                
+                let raw = Double(IOReportSimpleGetIntegerValue(item, 0))
+                let unit = (IOReportChannelGetUnitLabel(item)?.takeUnretainedValue() as? String)?
+                    .trimmingCharacters(in: .whitespaces) ?? ""
+                
+                let joules: Double
+                switch unit.lowercased() {
+                case "mj":       joules = raw / 1e3
+                case "uj", "µj": joules = raw / 1e6
+                case "nj":       joules = raw / 1e9
+                case "pj":       joules = raw / 1e12
+                default:         joules = raw / 1e9
+                }
+                
+                currentEnergy += joules
+                found = true
             }
             
-            currentEnergy += joules
-            found = true
+            guard found else { return nil }
+            
+            let now = Date()
+            defer {
+                self.previousANEEnergy = currentEnergy
+                self.previousANERead = now
+            }
+            
+            guard let previousRead = self.previousANERead else { return 0 }
+            let elapsed = now.timeIntervalSince(previousRead)
+            guard elapsed > 0 else { return 0 }
+            return (currentEnergy - self.previousANEEnergy) / elapsed
         }
-        
-        guard found else { return nil }
-        
-        let now = Date()
-        defer {
-            self.previousANEEnergy = currentEnergy
-            self.previousANERead = now
-        }
-        
-        guard let previousRead = self.previousANERead else { return 0 }
-        let elapsed = now.timeIntervalSince(previousRead)
-        guard elapsed > 0 else { return 0 }
-        return (currentEnergy - self.previousANEEnergy) / elapsed
     }
 }
 

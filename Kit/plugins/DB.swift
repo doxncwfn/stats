@@ -83,6 +83,7 @@ public class DB {
     
     private let historyQueue = DispatchQueue(label: "eu.exelban.db.history")
     private let historyRetention: TimeInterval = 24*60*60
+    private let inMemoryRetention: TimeInterval = 15*60
     private var historyTimer: DispatchSourceTimer?
     // Only unsaved samples are kept in memory; stored history is merged when reading or saving.
     private var historyBuckets: [String: [Date: HistoryBucket]] = [:]
@@ -153,29 +154,41 @@ public class DB {
     public func recordHistory<T: Encodable>(key: String, value: T, at: Date = Date(), duration: TimeInterval = 1) {
         guard !key.isEmpty, at.timeIntervalSince1970.isFinite, duration.isFinite, duration > 0 else { return }
         guard at.addingTimeInterval(60) > at else { return }
-        guard let snapshot = try? JSONEncoder().encode(value),
-              let object = try? JSONSerialization.jsonObject(with: snapshot, options: .fragmentsAllowed) else { return }
-        var values: [String: Double] = [:]
-        self.historyValues(object, path: "", values: &values)
         
-        self.historyQueue.async {
-            let cutoff = Date().addingTimeInterval(-self.historyRetention)
-            var start = max(at.addingTimeInterval(-min(duration, self.historyRetention)), cutoff)
-            guard start < at else { return }
+        autoreleasepool {
+            guard let snapshot = try? JSONEncoder().encode(value),
+                  let object = try? JSONSerialization.jsonObject(with: snapshot, options: .fragmentsAllowed) else { return }
+            var values: [String: Double] = [:]
+            self.historyValues(object, path: "", values: &values)
             
-            while start < at {
-                let timestamp = self.historyMinute(start)
-                let end = min(timestamp.addingTimeInterval(60), at)
-                let duration = end.timeIntervalSince(start)
-                
-                let statistics = values.mapValues{ HistoryStatistic(average: $0, minimum: $0, maximum: $0, count: 1, duration: duration) }
-                let bucket = HistoryBucket(timestamp: timestamp, recordedAt: at, snapshot: snapshot, values: statistics)
-                if self.historyBuckets[key]?[timestamp] != nil {
-                    self.historyBuckets[key]?[timestamp]?.merge(bucket)
-                } else {
-                    self.historyBuckets[key, default: [:]][timestamp] = bucket
+            self.historyQueue.async {
+                autoreleasepool {
+                    let cutoff = Date().addingTimeInterval(-self.inMemoryRetention)
+                    var start = max(at.addingTimeInterval(-min(duration, self.inMemoryRetention)), cutoff)
+                    guard start < at else { return }
+                    
+                    while start < at {
+                        let timestamp = self.historyMinute(start)
+                        let end = min(timestamp.addingTimeInterval(60), at)
+                        let duration = end.timeIntervalSince(start)
+                        
+                        let statistics = values.mapValues{ HistoryStatistic(average: $0, minimum: $0, maximum: $0, count: 1, duration: duration) }
+                        let bucket = HistoryBucket(timestamp: timestamp, recordedAt: at, snapshot: snapshot, values: statistics)
+                        if self.historyBuckets[key]?[timestamp] != nil {
+                            self.historyBuckets[key]?[timestamp]?.merge(bucket)
+                        } else {
+                            self.historyBuckets[key, default: [:]][timestamp] = bucket
+                        }
+                        start = end
+                    }
+                    
+                    if let count = self.historyBuckets[key]?.count, count > 15 {
+                        let sortedKeys = self.historyBuckets[key]!.keys.sorted()
+                        for oldKey in sortedKeys.prefix(count - 15) {
+                            self.historyBuckets[key]?.removeValue(forKey: oldKey)
+                        }
+                    }
                 }
-                start = end
             }
         }
     }
@@ -276,31 +289,44 @@ public class DB {
             }
         }
         
-        guard !values.isEmpty, self.save(values) else { return }
-        for (key, list) in values {
-            for bucket in list {
-                self.historyBuckets[key]?.removeValue(forKey: bucket.timestamp)
+        if !values.isEmpty && self.save(values) {
+            for (key, list) in values {
+                for bucket in list {
+                    self.historyBuckets[key]?.removeValue(forKey: bucket.timestamp)
+                }
+                if self.historyBuckets[key]?.isEmpty == true {
+                    self.historyBuckets.removeValue(forKey: key)
+                }
             }
-            if self.historyBuckets[key]?.isEmpty == true {
-                self.historyBuckets.removeValue(forKey: key)
+        } else {
+            let memoryCutoff = self.historyMinute(Date().addingTimeInterval(-self.inMemoryRetention))
+            for key in Array(self.historyBuckets.keys) {
+                self.historyBuckets[key] = self.historyBuckets[key]?.filter{ $0.key >= memoryCutoff }
             }
         }
     }
     
     private func cleanupHistory() {
         let now = Date()
-        let cutoff = self.historyMinute(now.addingTimeInterval(-self.historyRetention))
+        let memoryCutoff = self.historyMinute(now.addingTimeInterval(-self.inMemoryRetention))
         for key in Array(self.historyBuckets.keys) {
-            self.historyBuckets[key] = self.historyBuckets[key]?.filter{ $0.key >= cutoff }
+            self.historyBuckets[key] = self.historyBuckets[key]?.filter{ $0.key >= memoryCutoff }
+            if let count = self.historyBuckets[key]?.count, count > 15 {
+                let sortedKeys = self.historyBuckets[key]!.keys.sorted()
+                for oldKey in sortedKeys.prefix(count - 15) {
+                    self.historyBuckets[key]?.removeValue(forKey: oldKey)
+                }
+            }
             if self.historyBuckets[key]?.isEmpty == true {
                 self.historyBuckets.removeValue(forKey: key)
             }
         }
         
+        let diskCutoff = self.historyMinute(now.addingTimeInterval(-self.historyRetention))
         if let lastCleanup = self.lastHistoryCleanup, now >= lastCleanup, now.timeIntervalSince(lastCleanup) < 15*60 {
             return
         }
-        if self.prune(before: cutoff) {
+        if self.prune(before: diskCutoff) {
             self.lastHistoryCleanup = now
         }
     }

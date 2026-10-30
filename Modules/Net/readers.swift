@@ -431,39 +431,38 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
     }
     
     private func readProcessBandwidth() -> Bandwidth {
-        guard let output = process(
-            path: "/usr/bin/nettop",
-            arguments: ["-P", "-L", "1", "-n", "-k", "time,interface,state,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch"],
-            environment: [
-                "NSUnbufferedIO": "YES",
-                "LC_ALL": "en_US.UTF-8"
-            ],
-            timeout: 5
-        ) else { return Bandwidth() }
+        var telemetry = StatsNetworkTelemetry()
+        guard stats_core_poll_network(&telemetry) else { return Bandwidth() }
+        let count = Int(telemetry.count)
         
-        var totalUpload: Int64 = 0
-        var totalDownload: Int64 = 0
-        var firstLine = false
-        output.enumerateLines { (line, _) in
-            if !firstLine {
-                firstLine = true
-                return
-            }
-            
-            let parsedLine = line.split(separator: ",")
-            guard parsedLine.count >= 3 else {
-                return
-            }
-            
-            if let download = Int64(parsedLine[1]) {
-                totalDownload += download
-            }
-            if let upload = Int64(parsedLine[2]) {
-                totalUpload += upload
+        return withUnsafePointer(to: telemetry.interfaces) { ptr -> Bandwidth in
+            ptr.withMemoryRebound(to: StatsInterfaceInfo.self, capacity: count) { ifaces in
+                for i in 0..<count {
+                    let iface = ifaces[i]
+                    let name = withUnsafeBytes(of: iface.name) { b -> String in
+                        if let base = b.baseAddress?.assumingMemoryBound(to: CChar.self) {
+                            return String(cString: base)
+                        }
+                        return ""
+                    }
+                    if name == self.interfaceID {
+                        return Bandwidth(
+                            upload: Int64(clamping: iface.total_upload_bytes),
+                            download: Int64(clamping: iface.total_download_bytes)
+                        )
+                    }
+                }
+                
+                var totalUpload: Int64 = 0
+                var totalDownload: Int64 = 0
+                for i in 0..<count {
+                    let iface = ifaces[i]
+                    totalUpload += Int64(clamping: iface.total_upload_bytes)
+                    totalDownload += Int64(clamping: iface.total_download_bytes)
+                }
+                return Bandwidth(upload: totalUpload, download: totalDownload)
             }
         }
-        
-        return Bandwidth(upload: totalUpload, download: totalDownload)
     }
     
     private func requestDetails() {
@@ -675,29 +674,27 @@ internal class UsageReader: Reader<Network_Usage>, CWEventDelegate, CLLocationMa
             let country: String?
         }
         
-        DispatchQueue.global(qos: .userInitiated).async {
-            let response = syncShell("curl -s -4 https://api.mac-stats.com/ip")
-            if !response.isEmpty, let data = response.data(using: .utf8),
-               let addr = try? JSONDecoder().decode(Addr_s.self, from: data) {
+        if let url4 = URL(string: "https://api.mac-stats.com/ip") {
+            URLSession.shared.dataTask(with: url4) { [weak self] data, _, _ in
+                guard let self, let data, let addr = try? JSONDecoder().decode(Addr_s.self, from: data) else { return }
                 if let ip = addr.ipv4, self.isIPv4(ip) {
                     self.usage.raddr.v4 = ip
                 }
                 if let countryCode = addr.country {
                     self.usage.raddr.countryCode = countryCode
                 }
-            }
+            }.resume()
         }
-        DispatchQueue.global(qos: .userInitiated).async {
-            let response = syncShell("curl -s -6 https://api.mac-stats.com/ip")
-            if !response.isEmpty, let data = response.data(using: .utf8),
-               let addr = try? JSONDecoder().decode(Addr_s.self, from: data) {
+        if let url6 = URL(string: "https://api.mac-stats.com/ip") {
+            URLSession.shared.dataTask(with: url6) { [weak self] data, _, _ in
+                guard let self, let data, let addr = try? JSONDecoder().decode(Addr_s.self, from: data) else { return }
                 if let ip = addr.ipv6, !self.isIPv4(ip) {
                     self.usage.raddr.v6 = ip
                 }
                 if let countryCode = addr.country {
                     self.usage.raddr.countryCode = countryCode
                 }
-            }
+            }.resume()
         }
     }
     
@@ -845,106 +842,106 @@ public class ProcessReader: Reader<[Network_Process]> {
     
     public override func setup() {
         self.popup = true
-        self.preview = true
+        self.preview = false
     }
     
     public override func read() {
-        if self.numberOfProcesses == 0 {
-            return
-        }
-        
-        guard let output = process(
-            path: "/usr/bin/nettop",
-            arguments: ["-P", "-L", "1", "-n", "-k", "time,interface,state,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch"],
-            environment: [
-                "NSUnbufferedIO": "YES",
-                "LC_ALL": "en_US.UTF-8"
-            ],
-            timeout: 5
-        ) else { return }
-        
-        var list: [Network_Process] = []
-        var firstLine = false
-        output.enumerateLines { (line, _) in
-            if !firstLine {
-                firstLine = true
-                return
-            }
+        autoreleasepool {
+            guard !self.isLocked, self.numberOfProcesses != 0 else { return }
             
-            let parsedLine = line.split(separator: ",")
-            guard parsedLine.count >= 3 else {
-                return
-            }
+            guard let output = process(
+                path: "/usr/bin/nettop",
+                arguments: ["-P", "-L", "1", "-n", "-k", "time,interface,state,rx_dupe,rx_ooo,re-tx,rtt_avg,rcvsize,tx_win,tc_class,tc_mgt,cc_algo,P,C,R,W,arch"],
+                environment: [
+                    "NSUnbufferedIO": "YES",
+                    "LC_ALL": "en_US.UTF-8"
+                ],
+                timeout: 5
+            ) else { return }
             
-            var process = Network_Process()
-            process.time = Date()
-            
-            let nameArray = parsedLine[0].split(separator: ".")
-            if let pid = nameArray.last {
-                process.pid = Int(pid) ?? 0
-            }
-            if let app = NSRunningApplication(processIdentifier: pid_t(process.pid) ) {
-                process.name = app.localizedName ?? nameArray.dropLast().joined(separator: ".")
-            } else {
-                process.name = nameArray.dropLast().joined(separator: ".")
-            }
-            
-            if process.name == "" {
-                process.name = "\(process.pid)"
-            }
-            
-            if let download = Int(parsedLine[1]) {
-                process.download = download
-            }
-            if let upload = Int(parsedLine[2]) {
-                process.upload = upload
-            }
-            
-            list.append(process)
-        }
-        
-        var processes: [Network_Process] = []
-        if self.previous.isEmpty {
-            self.previous = list
-            processes = list
-        } else {
-            self.previous.forEach { (pp: Network_Process) in
-                if let i = list.firstIndex(where: { $0.pid == pp.pid }) {
-                    let p = list[i]
-                    
-                    var download = p.download - pp.download
-                    var upload = p.upload - pp.upload
-                    let time = download == 0 && upload == 0 ? pp.time : Date()
-                    list[i].time = time
-                    
-                    if download < 0 {
-                        download = 0
-                    }
-                    if upload < 0 {
-                        upload = 0
-                    }
-                    
-                    processes.append(Network_Process(pid: p.pid, name: p.name, time: time, download: download, upload: upload))
+            var list: [Network_Process] = []
+            var firstLine = false
+            output.enumerateLines { (line, _) in
+                if !firstLine {
+                    firstLine = true
+                    return
                 }
+                
+                let parsedLine = line.split(separator: ",")
+                guard parsedLine.count >= 3 else {
+                    return
+                }
+                
+                var process = Network_Process()
+                process.time = Date()
+                
+                let nameArray = parsedLine[0].split(separator: ".")
+                if let pid = nameArray.last {
+                    process.pid = Int(pid) ?? 0
+                }
+                if let app = NSRunningApplication(processIdentifier: pid_t(process.pid) ) {
+                    process.name = app.localizedName ?? nameArray.dropLast().joined(separator: ".")
+                } else {
+                    process.name = nameArray.dropLast().joined(separator: ".")
+                }
+                
+                if process.name == "" {
+                    process.name = "\(process.pid)"
+                }
+                
+                if let download = Int(parsedLine[1]) {
+                    process.download = download
+                }
+                if let upload = Int(parsedLine[2]) {
+                    process.upload = upload
+                }
+                
+                list.append(process)
             }
-            self.previous = list
-        }
-        
-        processes.sort {
-            let firstMax = max($0.download, $0.upload)
-            let secondMax = max($1.download, $1.upload)
-            let firstMin = min($0.download, $0.upload)
-            let secondMin = min($1.download, $1.upload)
             
-            if firstMax == secondMax && firstMin == secondMin { // download and upload values are the same, sort by time
-                return $0.time < $1.time
-            } else if firstMax == secondMax && firstMin != secondMin { // max values are the same, min not. Sort by min values
-                return firstMin < secondMin
+            var processes: [Network_Process] = []
+            if self.previous.isEmpty {
+                self.previous = list
+                processes = list
+            } else {
+                self.previous.forEach { (pp: Network_Process) in
+                    if let i = list.firstIndex(where: { $0.pid == pp.pid }) {
+                        let p = list[i]
+                        
+                        var download = p.download - pp.download
+                        var upload = p.upload - pp.upload
+                        let time = download == 0 && upload == 0 ? pp.time : Date()
+                        list[i].time = time
+                        
+                        if download < 0 {
+                            download = 0
+                        }
+                        if upload < 0 {
+                            upload = 0
+                        }
+                        
+                        processes.append(Network_Process(pid: p.pid, name: p.name, time: time, download: download, upload: upload))
+                    }
+                }
+                self.previous = list
             }
-            return firstMax < secondMax // max values are not the same, sort by max value
+            
+            processes.sort {
+                let firstMax = max($0.download, $0.upload)
+                let secondMax = max($1.download, $1.upload)
+                let firstMin = min($0.download, $0.upload)
+                let secondMin = min($1.download, $1.upload)
+                
+                if firstMax == secondMax && firstMin == secondMin {
+                    return $0.time < $1.time
+                } else if firstMax == secondMax && firstMin != secondMin {
+                    return firstMin < secondMin
+                }
+                return firstMax < secondMax
+            }
+            
+            self.callback(processes.suffix(self.numberOfProcesses).reversed())
         }
-        
-        self.callback(processes.suffix(self.numberOfProcesses).reversed())
     }
 }
 

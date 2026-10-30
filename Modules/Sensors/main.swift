@@ -25,6 +25,8 @@ public class Sensors: Module {
     
     private var selectedSensor: String
     
+    private var isSensorsInitialized: Bool = false
+    
     public init() {
         self.settingsView = Settings(.sensors)
         self.popupView = Popup()
@@ -39,7 +41,23 @@ public class Sensors: Module {
             portal: self.portalView,
             notifications: self.notificationsView
         )
-        guard self.available else { return }
+        guard self.available && self.enabled else { return }
+        self.initSensors()
+    }
+    
+    open override func enable() {
+        self.initSensors()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.sensorsReader?.stop()
+    }
+    
+    private func initSensors() {
+        guard !self.isSensorsInitialized, self.available else { return }
+        self.isSensorsInitialized = true
         
         self.sensorsReader = SensorsReader { [weak self] value in
             self?.usageCallback(value)

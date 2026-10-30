@@ -18,3 +18,4 @@ FOUNDATION_EXPORT double KitVersionNumber;
 FOUNDATION_EXPORT const unsigned char KitVersionString[];
 
 #import "lldb.h"
+#import "stats_core.h"

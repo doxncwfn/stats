@@ -113,6 +113,9 @@ internal class Popup: PopupWrapper {
     
     public override func appear() {
         self.replay(self.loadCache, render: self.renderLoad)
+        if let v = self.loadCache.value {
+            self.chart?.addValue(v.usage)
+        }
     }
     
     public override func disappear() {

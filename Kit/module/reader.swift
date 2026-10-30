@@ -15,6 +15,7 @@ public protocol Reader_p {
     var popup: Bool { get }
     var preview: Bool { get }
     var sleep: Bool { get }
+    var isLocked: Bool { get }
     
     func setup()
     func read()
@@ -156,7 +157,9 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
     open func start() {
         if (self.popup || self.preview || self.sleep) && self.locked {
             DispatchQueue.global(qos: .background).async {
-                self.read()
+                autoreleasepool {
+                    self.read()
+                }
             }
             return
         }
@@ -171,7 +174,11 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
                 }
             } else if !self.initlizalized {
                 self.startNormalRepeater()
-                DispatchQueue.global(qos: .background).async { self.read() }
+                DispatchQueue.global(qos: .background).async {
+                    autoreleasepool {
+                        self.read()
+                    }
+                }
                 self.repeatTask?.start()
                 self.initlizalized = true
             } else {
@@ -238,7 +245,9 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
         }
         
         self.repeatTask = Repeater(seconds: Int(interval)) { [weak self] in
-            self?.read()
+            autoreleasepool {
+                self?.read()
+            }
         }
     }
     
@@ -254,9 +263,15 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
         self.alignQueue.asyncAfter(deadline: .now() + self.delayToNextSecondBoundary()) { [weak self] in
             guard let self, self.alignGeneration == generation, self.repeatTask == nil else { return }
 
-            DispatchQueue.global(qos: .background).async { self.read() }
+            DispatchQueue.global(qos: .background).async {
+                autoreleasepool {
+                    self.read()
+                }
+            }
             self.repeatTask = Repeater(seconds: Int(interval)) { [weak self] in
-                self?.read()
+                autoreleasepool {
+                    self?.read()
+                }
             }
             self.repeatTask?.start()
         }
@@ -279,6 +294,10 @@ open class Reader<T: Codable>: NSObject, ReaderInternal_p {
 }
 
 extension Reader: Reader_p {
+    public var isLocked: Bool {
+        self.locked
+    }
+    
     public func lock() {
         self.locked = true
     }

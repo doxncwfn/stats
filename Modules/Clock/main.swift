@@ -123,7 +123,25 @@ public class Clock: Module {
             settings: self.settingsView,
             portal: self.portalView
         )
-        guard self.available else { return }
+        guard self.available && self.enabled else { return }
+        self.initClock()
+    }
+    
+    private var isClockInitialized: Bool = false
+    
+    open override func enable() {
+        self.initClock()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.reader?.stop()
+    }
+    
+    private func initClock() {
+        guard !self.isClockInitialized, self.available else { return }
+        self.isClockInitialized = true
         
         self.reader = ClockReader(.clock) { [weak self] value in
             self?.callback(value)

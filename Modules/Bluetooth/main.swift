@@ -99,7 +99,25 @@ public class Bluetooth: Module {
             settings: self.settingsView,
             notifications: self.notificationsView
         )
-        guard self.available else { return }
+        guard self.available && self.enabled else { return }
+        self.initBluetooth()
+    }
+    
+    private var isBluetoothInitialized: Bool = false
+    
+    open override func enable() {
+        self.initBluetooth()
+        super.enable()
+    }
+    
+    open override func disable() {
+        super.disable()
+        self.devicesReader?.stop()
+    }
+    
+    private func initBluetooth() {
+        guard !self.isBluetoothInitialized, self.available else { return }
+        self.isBluetoothInitialized = true
         
         self.devicesReader = DevicesReader { [weak self] value in
             self?.batteryCallback(value)

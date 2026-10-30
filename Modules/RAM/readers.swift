@@ -16,90 +16,50 @@ internal class UsageReader: Reader<RAM_Usage> {
     public var totalSize: Double = 0
     
     public override func setup() {
-        var stats = host_basic_info()
-        var count = UInt32(MemoryLayout<host_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
-        
-        let kerr: kern_return_t = withUnsafeMutablePointer(to: &stats) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_info(machHostPort, HOST_BASIC_INFO, $0, &count)
-            }
+        var raw = StatsRamUsage()
+        if stats_core_poll_ram(&raw) {
+            self.totalSize = Double(raw.total)
         }
-        
-        if kerr == KERN_SUCCESS {
-            self.totalSize = Double(stats.max_mem)
-            return
-        }
-        
-        self.totalSize = 0
-        error("host_info(): \(String(cString: mach_error_string(kerr), encoding: String.Encoding.ascii) ?? "unknown error")", log: self.log)
     }
     
     public override func read() {
-        var stats = vm_statistics64()
-        var count = UInt32(MemoryLayout<vm_statistics64_data_t>.offset(of: \.swapped_count)! / MemoryLayout<integer_t>.size)
-        
-        let result: kern_return_t = withUnsafeMutablePointer(to: &stats) {
-            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                host_statistics64(machHostPort, HOST_VM_INFO64, $0, &count)
-            }
-        }
-        
-        if result == KERN_SUCCESS {
-            let active = Double(stats.active_count) * Double(vm_page_size)
-            let speculative = Double(stats.speculative_count) * Double(vm_page_size)
-            let inactive = Double(stats.inactive_count) * Double(vm_page_size)
-            let wired = Double(stats.wire_count) * Double(vm_page_size)
-            let compressed = Double(stats.compressor_page_count) * Double(vm_page_size)
-            let purgeable = Double(stats.purgeable_count) * Double(vm_page_size)
-            let external = Double(stats.external_page_count) * Double(vm_page_size)
-            let swapins = Int64(stats.swapins)
-            let swapouts = Int64(stats.swapouts)
-            
-            let used = active + inactive + speculative + wired + compressed - purgeable - external
-            let free = self.totalSize - used
-            
-            var intSize: size_t = MemoryLayout<uint>.size
-            var pressureLevel: Int = 0
-            sysctlbyname("kern.memorystatus_vm_pressure_level", &pressureLevel, &intSize, nil, 0)
-            
-            var pressureValue: RAMPressure
-            switch pressureLevel {
-            case 2: pressureValue = .warning
-            case 4: pressureValue = .critical
-            default: pressureValue = .normal
-            }
-            
-            var stringSize: size_t = MemoryLayout<xsw_usage>.size
-            var swap: xsw_usage = xsw_usage()
-            sysctlbyname("vm.swapusage", &swap, &stringSize, nil, 0)
-            
-            self.callback(RAM_Usage(
-                total: self.totalSize,
-                used: used,
-                free: free,
-                
-                active: active,
-                inactive: inactive,
-                wired: wired,
-                compressed: compressed,
-                
-                app: used - wired - compressed,
-                cache: purgeable + external,
-                
-                swap: Swap(
-                    total: Double(swap.xsu_total),
-                    used: Double(swap.xsu_used),
-                    free: Double(swap.xsu_avail)
-                ),
-                pressure: Pressure(level: pressureLevel, value: pressureValue),
-                
-                swapins: swapins,
-                swapouts: swapouts
-            ))
+        var raw = StatsRamUsage()
+        guard stats_core_poll_ram(&raw) else {
             return
         }
         
-        error("host_statistics64(): \(String(cString: mach_error_string(result), encoding: String.Encoding.ascii) ?? "unknown error")", log: self.log)
+        self.totalSize = Double(raw.total)
+        
+        var pressureValue: RAMPressure
+        switch raw.pressure_level {
+        case 2: pressureValue = .warning
+        case 4: pressureValue = .critical
+        default: pressureValue = .normal
+        }
+        
+        self.callback(RAM_Usage(
+            total: Double(raw.total),
+            used: Double(raw.used),
+            free: Double(raw.free),
+            
+            active: Double(raw.active),
+            inactive: Double(raw.inactive),
+            wired: Double(raw.wired),
+            compressed: Double(raw.compressed),
+            
+            app: Double(raw.app),
+            cache: Double(raw.cache),
+            
+            swap: Swap(
+                total: Double(raw.swap_total),
+                used: Double(raw.swap_used),
+                free: Double(raw.swap_free)
+            ),
+            pressure: Pressure(level: Int(raw.pressure_level), value: pressureValue),
+            
+            swapins: raw.swapins,
+            swapouts: raw.swapouts
+        ))
     }
 }
 
@@ -127,47 +87,32 @@ public class ProcessReader: Reader<[TopProcess]> {
             return
         }
         
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/top")
-        if self.combinedProcesses {
-            task.arguments = ["-l", "1", "-o", "mem", "-stats", "pid,command,mem"]
-        } else {
-            task.arguments = ["-l", "1", "-o", "mem", "-n", "\(self.numberOfProcesses)", "-stats", "pid,command,mem"]
-        }
-        
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        
-        defer {
-            outputPipe.fileHandleForReading.closeFile()
-            errorPipe.fileHandleForReading.closeFile()
-        }
-        
-        task.standardOutput = outputPipe
-        task.standardError = errorPipe
-        
-        do {
-            try task.run()
-        } catch let err {
-            error("top(): \(err.localizedDescription)", log: self.log)
+        var procs = StatsTopProcesses()
+        let queryLimit: UInt32 = self.combinedProcesses ? 48 : UInt32(min(self.numberOfProcesses, 48))
+        guard stats_core_top_ram_processes(queryLimit, &procs) else {
             return
         }
         
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let output = String(data: outputData, encoding: .utf8)
-        _ = String(data: errorData, encoding: .utf8)
-        guard let output, !output.isEmpty else { return }
-        
         var processes: [TopProcess] = []
-        output.enumerateLines { (line, _) in
-            if line.matches("^\\d+\\** +.* +\\d+[A-Z]*\\+?\\-? *$") {
-                processes.append(ProcessReader.parseProcess(line))
+        let count = Int(procs.count)
+        withUnsafePointer(to: procs.processes) { ptr in
+            ptr.withMemoryRebound(to: StatsProcessInfo.self, capacity: count) { buf in
+                for i in 0..<count {
+                    let info = buf[i]
+                    let pid = Int(info.pid)
+                    var name = withUnsafeBytes(of: info.name) { rawPtr in
+                        String(cString: rawPtr.baseAddress!.assumingMemoryBound(to: CChar.self))
+                    }
+                    if let app = NSRunningApplication(processIdentifier: pid_t(pid)), let n = app.localizedName {
+                        name = n
+                    }
+                    processes.append(TopProcess(pid: pid, name: name, usage: Double(info.ram_bytes)))
+                }
             }
         }
         
         if !self.combinedProcesses {
-            self.callback(processes)
+            self.callback(Array(processes.prefix(self.numberOfProcesses)))
             return
         }
         
